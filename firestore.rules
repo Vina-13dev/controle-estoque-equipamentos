@@ -7,164 +7,89 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function userPath(uid) {
-      return /databases/$(database)/documents/stockUsers/$(uid);
+    function isRootAdmin() {
+      return signedIn() && request.auth.uid == 'RHvPSwuTEeY0alV2aWgTbRWPuBt1';
+    }
+
+    function myUserPath() {
+      return /databases/$(database)/documents/stockUsers/$(request.auth.uid);
     }
 
     function myProfileExists() {
-      return signedIn() && exists(userPath(request.auth.uid));
+      return signedIn() && exists(myUserPath());
     }
 
     function me() {
-      return get(userPath(request.auth.uid)).data;
+      return get(myUserPath()).data;
     }
 
     function activeUser() {
-      return myProfileExists() && me().active == true;
-    }
-
-    function isAdmin() {
-      return activeUser() && me().role == 'admin';
-    }
-
-    function canAccessUnit(unitId) {
-      return activeUser() && (
-        isAdmin() ||
-        (me().allowedUnitIds is list && me().allowedUnitIds.hasAny([unitId]))
+      return isRootAdmin() || (
+        myProfileExists() &&
+        me().active == true
       );
     }
 
-    function movementPath(movementId) {
-      return /databases/$(database)/documents/stockMovements/$(movementId);
+    function isAdmin() {
+      return isRootAdmin() || (
+        activeUser() &&
+        myProfileExists() &&
+        me().role == 'admin'
+      );
     }
 
-    function itemPath(itemId) {
-      return /databases/$(database)/documents/stockItems/$(itemId);
+    function canAccessUnit(unitId) {
+      return isAdmin() || (
+        activeUser() &&
+        myProfileExists() &&
+        me().allowedUnitIds is list &&
+        me().allowedUnitIds.hasAny([unitId])
+      );
     }
 
-    match /stockSystem/bootstrap {
-      allow get: if signedIn();
-      allow list: if false;
-      // O primeiro usuário autenticado pode registrar o bootstrap uma única vez.
-      // Por isso, faça o primeiro login administrativo antes de divulgar o site.
-      allow create: if signedIn()
-        && !exists(/databases/$(database)/documents/stockSystem/bootstrap)
-        && request.resource.data.adminUid == request.auth.uid;
-      allow update, delete: if false;
-    }
-
+    // Usuários
     match /stockUsers/{userId} {
       allow get: if signedIn() && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
 
-      // Primeiro acesso em banco vazio: o usuário e o documento de bootstrap
-      // são criados na mesma transação e ele vira administrador.
-      allow create: if isAdmin()
-        || (
-          signedIn()
-          && request.auth.uid == userId
-          && request.resource.data.role == 'admin'
-          && request.resource.data.active == true
-          && request.resource.data.allowedUnitIds is list
-          && request.resource.data.allowedUnitIds.hasOnly(['*'])
-          && getAfter(/databases/$(database)/documents/stockSystem/bootstrap).data.adminUid == request.auth.uid
-        )
-        || (
-          signedIn()
-          && request.auth.uid == userId
-          && request.resource.data.role == 'operator'
-          && request.resource.data.active == false
-          && request.resource.data.allowedUnitIds is list
-          && request.resource.data.allowedUnitIds.size() == 0
-          && exists(/databases/$(database)/documents/stockSystem/bootstrap)
-        );
+      // Usuário novo pode criar somente o próprio perfil pendente.
+      allow create: if (
+        signedIn() &&
+        request.auth.uid == userId &&
+        request.resource.data.role == 'operator' &&
+        request.resource.data.active == false &&
+        request.resource.data.allowedUnitIds is list &&
+        request.resource.data.allowedUnitIds.size() == 0
+      ) || isAdmin();
 
       allow update: if isAdmin();
       allow delete: if false;
     }
 
+    // Unidades
     match /stockUnits/{unitId} {
-      // Operador só consegue buscar as unidades que foram liberadas para ele.
-      allow get: if activeUser() && (
-        isAdmin() ||
-        (me().allowedUnitIds is list && me().allowedUnitIds.hasAny([unitId]))
-      );
-      allow list: if isAdmin();
+      allow read: if isAdmin() || canAccessUnit(unitId);
       allow create, update: if isAdmin();
       allow delete: if false;
     }
 
+    // Itens
     match /stockItems/{itemId} {
       allow read: if canAccessUnit(resource.data.unitId);
-
-      // Novo item sempre começa em zero. O saldo inicial é lançado como Entrada.
-      allow create: if canAccessUnit(request.resource.data.unitId)
-        && request.resource.data.quantity == 0
-        && request.resource.data.createdBy == request.auth.uid;
-
-      // Edição de nome/categoria/mínimo não altera o saldo.
-      allow update: if canAccessUnit(resource.data.unitId)
-        && request.resource.data.unitId == resource.data.unitId
-        && (
-          (
-            request.resource.data.quantity == resource.data.quantity
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'name', 'category', 'measure', 'minimum', 'note', 'active',
-              'updatedBy', 'updatedByName', 'updatedAt'
-            ])
-          )
-          ||
-          (
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'quantity', 'lastMovementId', 'updatedBy', 'updatedByName', 'updatedAt'
-            ])
-            && request.resource.data.updatedBy == request.auth.uid
-            && request.resource.data.lastMovementId is string
-            && getAfter(movementPath(request.resource.data.lastMovementId)).data.itemId == itemId
-            && getAfter(movementPath(request.resource.data.lastMovementId)).data.unitId == resource.data.unitId
-            && getAfter(movementPath(request.resource.data.lastMovementId)).data.createdBy == request.auth.uid
-            && getAfter(movementPath(request.resource.data.lastMovementId)).data.afterQty == request.resource.data.quantity
-          )
-        );
-
+      allow create: if canAccessUnit(request.resource.data.unitId);
+      allow update: if canAccessUnit(resource.data.unitId);
       allow delete: if false;
     }
 
+    // Movimentações / histórico
     match /stockMovements/{movementId} {
       allow read: if canAccessUnit(resource.data.unitId);
-
       allow create: if canAccessUnit(request.resource.data.unitId)
-        && request.resource.data.createdBy == request.auth.uid
-        && request.resource.data.itemId is string
-        && exists(itemPath(request.resource.data.itemId))
-        && get(itemPath(request.resource.data.itemId)).data.unitId == request.resource.data.unitId
-        && request.resource.data.beforeQty == get(itemPath(request.resource.data.itemId)).data.quantity
-        && request.resource.data.afterQty == getAfter(itemPath(request.resource.data.itemId)).data.quantity
-        && request.resource.data.delta == request.resource.data.afterQty - request.resource.data.beforeQty
-        && request.resource.data.afterQty >= 0
-        && (
-          (
-            request.resource.data.type == 'entrada'
-            && request.resource.data.quantity > 0
-            && request.resource.data.afterQty == request.resource.data.beforeQty + request.resource.data.quantity
-          )
-          ||
-          (
-            request.resource.data.type == 'saida'
-            && request.resource.data.quantity > 0
-            && request.resource.data.afterQty == request.resource.data.beforeQty - request.resource.data.quantity
-          )
-          ||
-          (
-            request.resource.data.type == 'ajuste'
-            && request.resource.data.quantity >= 0
-            && request.resource.data.afterQty == request.resource.data.quantity
-          )
-        );
-
+                    && request.resource.data.createdBy == request.auth.uid;
       allow update, delete: if false;
     }
 
+    // Bloqueia qualquer coleção não prevista.
     match /{document=**} {
       allow read, write: if false;
     }

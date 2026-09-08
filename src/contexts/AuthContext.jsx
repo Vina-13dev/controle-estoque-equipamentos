@@ -14,45 +14,37 @@ const AuthContext = createContext(null)
 const googleProvider = new GoogleAuthProvider()
 googleProvider.setCustomParameters({ prompt: 'select_account' })
 
-// Administrador principal fixo do sistema.
-// O UID não é uma senha; ele apenas identifica qual conta deve ser admin.
 const ROOT_ADMIN_UID = 'RHvPSwuTEeY0alV2aWgTbRWPuBt1'
 
-async function ensureProfile(user) {
-  const userRef = doc(db, 'stockUsers', user.uid)
-  const isRootAdmin = user.uid === ROOT_ADMIN_UID
+function rootAdminProfile(user) {
+  return {
+    id: user.uid,
+    name: user.displayName || 'Administrador',
+    email: user.email || '',
+    username: '',
+    provider: 'google.com',
+    role: 'admin',
+    active: true,
+    allowedUnitIds: ['*'],
+  }
+}
 
-  let snap = await getDoc(userRef)
-
-  // Garante que a conta principal SEMPRE seja administradora,
-  // mesmo se um perfil antigo tiver sido criado como operador/bloqueado.
-  if (isRootAdmin) {
-    await setDoc(
-      userRef,
-      {
-        name: user.displayName || user.email?.split('@')[0] || 'Administrador',
-        email: user.email || '',
-        username: '',
-        provider: user.providerData?.[0]?.providerId || 'google.com',
-        role: 'admin',
-        active: true,
-        allowedUnitIds: ['*'],
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    )
-
-    snap = await getDoc(userRef)
-    return snap.exists() ? { id: snap.id, ...snap.data() } : null
+async function loadOrCreateProfile(user) {
+  // IMPORTANTE:
+  // O administrador principal NÃO depende do Firestore para conseguir entrar.
+  // Isso evita travar o sistema durante o bootstrap inicial.
+  if (user.uid === ROOT_ADMIN_UID) {
+    return rootAdminProfile(user)
   }
 
-  // Se já existe perfil, usa exatamente as permissões definidas pelo admin.
+  const userRef = doc(db, 'stockUsers', user.uid)
+  let snap = await getDoc(userRef)
+
   if (snap.exists()) {
     return { id: snap.id, ...snap.data() }
   }
 
-  // Nova conta Google: cria cadastro pendente automaticamente.
-  // Ela só entra após um administrador liberar unidade e status.
+  // Contas Google novas entram como pendentes até o administrador liberar.
   await setDoc(userRef, {
     name: user.displayName || user.email?.split('@')[0] || 'Usuário',
     email: user.email || '',
@@ -88,10 +80,10 @@ export function AuthProvider({ children }) {
       setLoading(true)
 
       try {
-        const loadedProfile = await ensureProfile(user)
+        const loadedProfile = await loadOrCreateProfile(user)
 
         if (!loadedProfile) {
-          throw new Error('Perfil não encontrado após autenticação.')
+          throw new Error('Perfil não encontrado.')
         }
 
         setProfile(loadedProfile)
@@ -127,7 +119,7 @@ export function AuthProvider({ children }) {
     if (!auth.currentUser) return
 
     try {
-      const loadedProfile = await ensureProfile(auth.currentUser)
+      const loadedProfile = await loadOrCreateProfile(auth.currentUser)
       setProfile(loadedProfile)
       setError('')
     } catch (err) {

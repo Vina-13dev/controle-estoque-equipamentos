@@ -6,16 +6,20 @@ import {
   signInWithPopup,
   signOut as firebaseSignOut,
 } from 'firebase/auth'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore'
 import { auth, db } from '../firebase/config'
 import { ROLES } from '../utils/constants'
 
 const AuthContext = createContext(null)
 const googleProvider = new GoogleAuthProvider()
 
+// Primeiro administrador do sistema.
+// Esse UID pode criar automaticamente o próprio perfil como admin.
+const FIRST_ADMIN_UID = 'RHvPSwuTEeY0alV2aWgTbRWPuBt1'
+
 export function AuthProvider({ children }) {
   const [firebaseUser, setFirebaseUser] = useState(null)
-  const [profile, setProfile] = useState(null) // documento em /users/{uid}
+  const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -31,23 +35,42 @@ export function AuthProvider({ children }) {
       }
 
       setFirebaseUser(user)
+      setLoading(true)
 
       try {
-        const snap = await getDoc(doc(db, 'users', user.uid))
+        const userRef = doc(db, 'users', user.uid)
+        let snap = await getDoc(userRef)
+
+        // Se o usuário autenticou mas ainda não possui perfil,
+        // o sistema cria automaticamente.
+        if (!snap.exists()) {
+          const isFirstAdmin = user.uid === FIRST_ADMIN_UID
+
+          const initialProfile = {
+            name: user.displayName || user.email?.split('@')[0] || 'Usuário',
+            email: user.email || '',
+            role: isFirstAdmin ? ROLES.ADMIN : ROLES.OPERADOR,
+            active: isFirstAdmin,
+            allowedUnits: isFirstAdmin ? ['*'] : [],
+            createdAt: serverTimestamp(),
+            createdBy: 'automatic',
+            provider: user.providerData?.[0]?.providerId || 'firebase',
+          }
+
+          await setDoc(userRef, initialProfile)
+          snap = await getDoc(userRef)
+        }
 
         if (snap.exists()) {
           setProfile({ id: snap.id, ...snap.data() })
         } else {
           setProfile(null)
-          setError(
-            'Sua conta foi autenticada, mas ainda não possui perfil no sistema. ' +
-              'Crie um documento em /users usando este UID: ' +
-              user.uid
-          )
+          setError('Não foi possível criar ou carregar seu perfil de usuário.')
         }
       } catch (err) {
         console.error(err)
-        setError('Não foi possível carregar seu perfil de usuário.')
+        setProfile(null)
+        setError('Não foi possível criar ou carregar seu perfil de usuário.')
       } finally {
         setLoading(false)
       }
